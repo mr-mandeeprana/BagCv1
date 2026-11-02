@@ -1,0 +1,11 @@
+﻿venv/
+.venv/
+__pycache__/
+.pytest_temp/
+*.pyc
+logs/
+*.log
+.env
+config_backups/
+
+data/videos/*.mp4
