@@ -350,6 +350,22 @@ class Pipeline:
         # every 2nd frame only after measuring that the GPU can't keep up.
         self.frame_skip = max(int(camera_config.get("frame_skip", 1)), 1)
 
+        trigger_config = camera_config.get("idle_trigger", {}) or {}
+        self.trigger_enabled = bool(trigger_config.get("enabled", True))
+        self.trigger_check_interval = 1.0 / max(float(trigger_config.get("check_rate_hz", 2.0)), 0.1)
+        self.trigger_sensitivity = max(float(trigger_config.get("sensitivity", 12.0)), 0.0)
+        self.trigger_min_changed_fraction = max(
+            float(trigger_config.get("min_changed_fraction", 0.02)), 0.0
+        )
+        self.trigger_downscale_width = max(int(trigger_config.get("downscale_width", 160)), 32)
+        self.trigger_roi = trigger_config.get("roi")
+        self.model_idle_timeout = max(float(trigger_config.get("idle_timeout_seconds", 30.0)), 0.0)
+        self.process_width = max(int(camera_config.get("process_width", 1280)), 0)
+        self.process_height = max(int(camera_config.get("process_height", 720)), 0)
+        self._last_trigger_check = 0.0
+        self._trigger_reference = None
+        self._bag_active_until = 0.0
+
         # On-screen FPS is averaged over a rolling window (seconds).
         self.fps_window_seconds = max(float(camera_config.get("fps_window_seconds", 1.0)), 0.25)
         self._fps_window = deque()
@@ -494,6 +510,9 @@ class Pipeline:
                     False,
                 )
             ),
+            width=camera_config.get("width", 1280),
+            height=camera_config.get("height", 720),
+            fps=camera_config.get("fps", 0),
             logger=self.logger,
         )
 
@@ -1579,6 +1598,13 @@ class Pipeline:
                     _perf_total_start,
                 )
 
+            # Keep the expensive detector completely out of the idle path.
+            if not self._bag_trigger_active(frame):
+                detector = getattr(self.inference_manager, "detector", None)
+                if detector is not None:
+                    detector.unload_if_idle()
+                return self._process_idle_frame(frame)
+
             # ==============================================
             # OPTIONAL FRAME SKIP (disabled by default)
             # ==============================================
@@ -1589,6 +1615,7 @@ class Pipeline:
             ):
                 # Deliberate, configured skip only (frame_skip in
                 # camera config). Default is no skipping.
+                self._set_latest_frame(frame)
                 return True
 
             self.processed_frame_count += 1
@@ -2028,6 +2055,11 @@ class Pipeline:
 
         self.last_error = None
 
+        return True
+
+    def _process_idle_frame(self, frame):
+        """Publish the latest frame without full-resolution annotation work."""
+        self._set_latest_frame(frame)
         return True
 
     # ======================================================
@@ -2949,7 +2981,51 @@ class Pipeline:
 
             return None
 
+        if self.process_width and self.process_height:
+            frame_height, frame_width = frame.shape[:2]
+            if (frame_width, frame_height) != (self.process_width, self.process_height):
+                frame = cv2.resize(
+                    frame,
+                    (self.process_width, self.process_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+
         return frame
+
+    def _bag_trigger_active(self, frame):
+        """Run a small ROI motion check at a throttled rate."""
+        now = time.monotonic()
+        if not self.trigger_enabled:
+            return True
+        if now - self._last_trigger_check < self.trigger_check_interval:
+            return now < self._bag_active_until
+        self._last_trigger_check = now
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape[:2]
+        roi = self.trigger_roi or {
+            "x1": 0, "y1": 0, "x2": width, "y2": height
+        }
+        x1 = max(0, min(int(roi.get("x1", 0)), width))
+        y1 = max(0, min(int(roi.get("y1", 0)), height))
+        x2 = max(x1 + 1, min(int(roi.get("x2", width)), width))
+        y2 = max(y1 + 1, min(int(roi.get("y2", height)), height))
+        crop = gray[y1:y2, x1:x2]
+        scale = min(1.0, self.trigger_downscale_width / max(crop.shape[1], 1))
+        if scale < 1.0:
+            crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        blurred = cv2.GaussianBlur(crop, (5, 5), 0)
+        changed = False
+        if self._trigger_reference is not None and self._trigger_reference.shape == blurred.shape:
+            difference = cv2.absdiff(blurred, self._trigger_reference)
+            changed = (
+                float((difference > self.trigger_sensitivity).mean())
+                >= self.trigger_min_changed_fraction
+            )
+        self._trigger_reference = blurred
+        if changed:
+            self._bag_active_until = now + self.model_idle_timeout
+        return now < self._bag_active_until
 
     # ======================================================
     # DETECT

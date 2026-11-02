@@ -84,6 +84,9 @@ class Camera:
         read_retry_attempts: int = 2,
         read_retry_delay: float = 0.05,
         realtime_playback: bool = False,
+        width: int = 1280,
+        height: int = 720,
+        fps: float = 0.0,
     ):
         # ==================================================
         # BASIC CONFIGURATION
@@ -159,6 +162,9 @@ class Camera:
         # Video files only: sleep so playback runs at the file's native
         # FPS instead of as fast as the pipeline can consume frames.
         self.realtime_playback = bool(realtime_playback)
+        self.requested_width = max(int(width), 0)
+        self.requested_height = max(int(height), 0)
+        self.requested_fps = max(float(fps), 0.0)
 
         self._next_video_frame_time = None
 
@@ -910,6 +916,16 @@ class Camera:
                 fps = 0.0
 
             self.fps = fps
+            self._log(
+                "info",
+                f"{self.name}: actual capture format {self.width}x{self.height} @ {self.fps:.2f} FPS",
+            )
+            if self.requested_width and self.width != self.requested_width:
+                self._log("warning", f"{self.name}: requested width {self.requested_width}, got {self.width}.")
+            if self.requested_height and self.height != self.requested_height:
+                self._log("warning", f"{self.name}: requested height {self.requested_height}, got {self.height}.")
+            if self.requested_fps and self.fps and abs(self.fps - self.requested_fps) > 0.5:
+                self._log("warning", f"{self.name}: requested FPS {self.requested_fps:g}, got {self.fps:.2f}.")
 
         except Exception as error:
             self._log("warning", f"{self.name}: failed to read " f"camera metadata: {error}")
@@ -970,3 +986,16 @@ class Camera:
                 return
 
         print(f"[{level.upper()}] {message}")
+        requested_properties = (
+            (cv2.CAP_PROP_FRAME_WIDTH, self.requested_width, "width"),
+            (cv2.CAP_PROP_FRAME_HEIGHT, self.requested_height, "height"),
+            (cv2.CAP_PROP_FPS, self.requested_fps, "FPS"),
+        )
+        for prop, value, label in requested_properties:
+            if value <= 0:
+                continue
+            try:
+                if not self.cap.set(prop, value):
+                    self._log("warning", f"{self.name}: camera rejected requested {label}={value}.")
+            except Exception as error:
+                self._log("warning", f"{self.name}: could not set {label}={value}: {error}")
