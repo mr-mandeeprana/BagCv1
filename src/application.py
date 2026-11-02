@@ -227,10 +227,6 @@ class Application:
                 # FP16 should not be enabled for CPU inference.
                 # ----------------------------------------------
 
-                if str(model_device).lower() == "cpu":
-
-                    model_half = False
-
                 self.logger.info("Initializing shared YOLO Detector.")
 
                 self.logger.info(f"Model device: {model_device}")
@@ -272,6 +268,13 @@ class Application:
                     class_confidence_thresholds=model_config.get("class_confidence_thresholds"),
                     detection_roi=model_config.get("detection_roi"),
                     logger=self.logger,
+                    lazy_load=True,
+                    idle_timeout_seconds=model_config.get(
+                        "idle_timeout_seconds",
+                        (ai_cameras[0].get("idle_trigger", {}) or {}).get(
+                            "idle_timeout_seconds", 30.0
+                        ),
+                    ),
                 )
 
                 # ----------------------------------------------
@@ -297,7 +300,7 @@ class Application:
 
                 self.logger.info("Shared YOLO Detector initialized.")
 
-                self.dashboard_state.update_health({"model_loaded": True})
+                self.dashboard_state.update_health({"model_loaded": False})
 
             except Exception as error:
 

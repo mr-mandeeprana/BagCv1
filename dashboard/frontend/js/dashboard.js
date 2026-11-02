@@ -8359,6 +8359,25 @@ function applyKpiRangeFilter(hours) {
    a second streaming mechanism.
    ========================================================== */
 
+function stopCameraViewStream() {
+
+    const feed =
+        byId("cameraViewFeed");
+
+    if (!feed) {
+        return;
+    }
+
+    const image =
+        feed.querySelector("img.camera-feed-stream");
+
+    if (image) {
+        image.src = "";
+        image.remove();
+    }
+}
+
+
 function renderCameraViewModal(index) {
 
     const clampedIndex =
@@ -8410,6 +8429,8 @@ function renderCameraViewModal(index) {
         return;
     }
 
+    stopCameraViewStream();
+
     if (!online) {
 
         feed.innerHTML =
@@ -8425,6 +8446,9 @@ function renderCameraViewModal(index) {
 
     const image =
         document.createElement("img");
+
+    image.className =
+        "camera-feed-stream";
 
     image.alt =
         `${cameraDisplayName} live feed`;
@@ -8483,6 +8507,8 @@ function closeCameraView() {
     if (!modal) {
         return;
     }
+
+    stopCameraViewStream();
 
     modal.style.display =
         "none";

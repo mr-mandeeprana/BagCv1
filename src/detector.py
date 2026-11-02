@@ -48,6 +48,41 @@ torch.set_num_threads(min(max(1, os.cpu_count() or 1), 4))
 torch.set_num_interop_threads(1)
 
 
+def resolve_device(requested_device, logger=None):
+    """Resolve and validate the configured inference device."""
+    requested = str(requested_device or "auto").strip().lower()
+    is_cuda_request = requested in {"cuda", "gpu"} or requested.startswith("cuda:")
+
+    if requested == "auto":
+        resolved = "cuda:0" if torch.cuda.is_available() else "cpu"
+    elif is_cuda_request and torch.cuda.is_available():
+        if requested in {"cuda", "gpu"}:
+            resolved = "cuda:0"
+        else:
+            try:
+                index = int(requested.split(":", 1)[1])
+            except (ValueError, IndexError):
+                index = -1
+            if index < 0 or index >= torch.cuda.device_count():
+                _log_device(logger, "warning", f"Invalid CUDA device '{requested}'; falling back to cuda:0.")
+                resolved = "cuda:0"
+            else:
+                resolved = requested
+    elif is_cuda_request:
+        _log_device(logger, "warning", "CUDA requested but unavailable; falling back to CPU.")
+        resolved = "cpu"
+    else:
+        resolved = requested or "cpu"
+
+    _log_device(logger, "info", f"Resolved inference device: {resolved}")
+    return resolved
+
+
+def _log_device(logger, level, message):
+    if logger is not None and hasattr(logger, level):
+        getattr(logger, level)(message)
+
+
 class Detector:
     """
     Shared YOLO detector.
@@ -75,6 +110,8 @@ class Detector:
         class_confidence_thresholds=None,
         detection_roi=None,
         logger=None,
+        lazy_load: bool = False,
+        idle_timeout_seconds: float = 30.0,
     ):
         # ==================================================
         # CONFIGURATION
@@ -153,56 +190,7 @@ class Detector:
         # DEVICE
         # ==================================================
 
-        requested_device = str(device).strip().lower()
-
-        # Support:
-        #   cpu
-        #   cuda
-        #   cuda:0
-        #   cuda:1
-        #   gpu
-        is_cuda_request = (
-            requested_device in {"cuda", "gpu"}
-            or requested_device.startswith("cuda:")
-        )
-
-        if is_cuda_request and torch.cuda.is_available():
-
-            # Explicit GPU index, e.g. cuda:0
-            if requested_device.startswith("cuda:"):
-                try:
-                    gpu_index = int(requested_device.split(":", 1)[1])
-
-                    if gpu_index < 0 or gpu_index >= torch.cuda.device_count():
-                        raise ValueError(
-                            f"Invalid CUDA device index: {gpu_index}. "
-                            f"Available GPUs: {torch.cuda.device_count()}"
-                        )
-
-                    self.device = requested_device
-
-                except (ValueError, IndexError):
-                    self._log(
-                        "warning",
-                        f"Invalid CUDA device '{requested_device}'. "
-                        "Falling back to cuda:0.",
-                    )
-                    self.device = "cuda:0"
-
-            else:
-                # "cuda" / "gpu" means first GPU
-                self.device = "cuda:0"
-
-        else:
-
-            if is_cuda_request:
-                self._log(
-                    "warning",
-                    "CUDA requested but unavailable. "
-                    "Falling back to CPU.",
-                )
-
-            self.device = "cpu"
+        self.device = resolve_device(device, logger)
 
         # --------------------------------------------------
         # FP16 / Quantization
@@ -223,6 +211,11 @@ class Detector:
             half
             and self.device.startswith("cuda")
         )
+        self.model = None
+        self._model_lock = threading.RLock()
+        self._loaded = False
+        self._idle_timeout_seconds = max(float(idle_timeout_seconds), 0.0)
+        self._last_activity = time.monotonic()
 
         # Precision kwargs passed to predict(); finalized during warm-up.
         self._precision_kwargs = (
@@ -243,24 +236,12 @@ class Detector:
 
         self._validate_model_file()
 
-        self._log(
-            "info",
-            f"Loading YOLO model: {self.model_path}",
-        )
+        self._log("info", f"YOLO model path configured: {self.model_path}")
 
-        self._load_model()
-
-        self._fuse_model()
-
-        self._warm_up_model()
-
-        self._log(
-            "info",
-            "YOLO model ready. "
-            f"Device: {self.device}, "
-            f"imgsz: {self.image_size}, "
-            f"fp16: {self.half}",
-        )
+        if not lazy_load:
+            self.ensure_loaded()
+        else:
+            self._log("info", "YOLO model configured for lazy loading; no model loaded while idle.")
 
     # ======================================================
     # BUILD PREDICTION ARGUMENTS
@@ -309,6 +290,8 @@ class Detector:
         # --------------------------------------------------
 
         with self._inference_lock:
+            self.ensure_loaded()
+            self._last_activity = time.monotonic()
             self.frame_index += 1
 
             frame_index = self.frame_index
@@ -406,6 +389,57 @@ class Detector:
 
         return detections
 
+    @property
+    def is_loaded(self):
+        with self._model_lock:
+            return self._loaded
+
+    def ensure_loaded(self):
+        """Load and warm the model exactly once, safely with inference."""
+        with self._model_lock:
+            if self._loaded:
+                return
+            self._log("info", f"Loading YOLO model on device {self.device}: {self.model_path}")
+            self._load_model()
+            self._fuse_model()
+            self._warm_up_model()
+            self._loaded = True
+            self._last_activity = time.monotonic()
+            self._log(
+                "info",
+                f"YOLO model ready. Device: {self.device}, imgsz: {self.image_size}, fp16: {self.half}",
+            )
+
+    def unload_if_idle(self):
+        """Unload only after no inference activity for the configured timeout."""
+        if self._idle_timeout_seconds <= 0:
+            return False
+        with self._inference_lock:
+            with self._model_lock:
+                if not self._loaded or time.monotonic() - self._last_activity < self._idle_timeout_seconds:
+                    return False
+                return self._unload_locked(
+                    f"after {self._idle_timeout_seconds:.1f}s idle"
+                )
+
+    def unload(self):
+        """Unload the model immediately when inference is no longer needed."""
+        with self._inference_lock:
+            with self._model_lock:
+                if not self._loaded:
+                    return False
+                return self._unload_locked("because no bag was detected")
+
+    def _unload_locked(self, reason):
+        self._log("info", f"Unloading YOLO model {reason}.")
+        self.model = None
+        self._loaded = False
+        import gc
+        gc.collect()
+        if self.device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return True
+
     # ======================================================
     # CLASS NAME
     # ======================================================
@@ -414,6 +448,8 @@ class Detector:
         """
         Return the YOLO class name for a class ID.
         """
+        if self.model is None:
+            return str(class_id)
 
         if isinstance(self.model.names, dict):
             return self.model.names.get(class_id, str(class_id))

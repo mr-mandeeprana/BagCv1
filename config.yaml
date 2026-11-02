@@ -5,9 +5,11 @@ model:
   path: models/best.pt
   confidence: 0.2
   iou: 0.45
-  device: cuda:0
+  # Current environment: AMD GPU with CPU-only PyTorch.
+  # Use cuda:0 only with an NVIDIA CUDA-enabled PyTorch install.
+  device: cpu
   image_size: 640
-  half: true
+  half: false
   max_detections: 20
   min_bbox_area: 800
   detection_roi:
@@ -20,6 +22,7 @@ model:
   - 1
   bag_confidence: 0.1
   print_confidence: 0.2
+  idle_timeout_seconds: 5
 tracker:
   type: bytetrack
   track_high_thresh: 0.1
@@ -142,7 +145,7 @@ production:
 cameras:
 - id: 1
   name: Camera 1
-  enabled: false
+  enabled: true
   ai_enabled: true
   production:
     count_enabled: true
@@ -150,13 +153,32 @@ cameras:
     roi_counting_enabled: true
     include_bags_in_total: true
     include_prints_in_total: true
-  mode: rtsp
-  source: rtsp://BEUMER:Beumer!123@192.168.1.242:554/live/1/1
+  # mode: rtsp
+  # source: rtsp://BEUMER:Beumer!123@192.168.1.242:554/live/1/1
+  mode: video
+  source: data/videos/C2.mp4
   buffer_size: 1
+  width: 1280
+  height: 720
+  fps: 15
+  process_width: 1280
+  process_height: 720
+  idle_trigger:
+    enabled: true
+    check_rate_hz: 2
+    sensitivity: 12
+    min_changed_fraction: 0.02
+    downscale_width: 160
+    idle_timeout_seconds: 5
+    roi:
+      x1: 0
+      y1: 0
+      x2: 1280
+      y2: 720
   realtime_playback: true
   frame_skip: 1
   performance_monitoring: false
-  inference_timeout: 15
+  inference_timeout: 5
   dashboard_publish_interval: 0.5
   display:
     show_line_count: true
@@ -176,16 +198,17 @@ cameras:
     path: models/best.pt
     confidence: 0.2
     iou: 0.45
-    device: cuda:0
+    device: cpu
     image_size: 640
-    half: true
+    half: false
     max_detections: 20
     min_bbox_area: 800
+    # Belt ROI: x 480-800 (center 640 = frame center), full height
     detection_roi:
-      x1: 800
+      x1: 480
       y1: 0
-      x2: 1500
-      y2: 1296
+      x2: 800
+      y2: 720
     allowed_classes:
     - 0
     bag_confidence: 0.1
@@ -203,9 +226,9 @@ cameras:
   entry_roi_counting:
     enabled: true
     roi:
-      x1: 960
+      x1: 480
       y1: 0
-      x2: 1325
+      x2: 800
       y2: 330
     min_track_frames: 4
     duplicate_distance: 50
@@ -217,10 +240,10 @@ cameras:
   jam_detection:
     enabled: true
     roi:
-      x1: 850
+      x1: 480
       y1: 0
-      x2: 1430
-      y2: 1296
+      x2: 800
+      y2: 720
     history_seconds: 1
     min_history_seconds: 0.5
     stationary_speed_threshold: 4
@@ -232,27 +255,61 @@ cameras:
     ignore_unstable_tracks: true
     ignore_motion_jumps: true
     track_ttl_seconds: 2
+  # Added: Camera 1 previously inherited the global 850-1430 ROI
+  bag_spacing:
+    enabled: true
+    roi:
+      x1: 480
+      y1: 0
+      x2: 800
+      y2: 720
+    calibration:
+      # Image points moved onto the belt; world_points_mm kept as before.
+      # Recalibrate with real measurements if you rely on mm gaps.
+      image_points:
+      - - 480
+        - 0
+      - - 800
+        - 0
+      - - 800
+        - 720
+      - - 480
+        - 720
+      world_points_mm:
+      - - 0
+        - 0
+      - - 2540
+        - 0
+      - - 2540
+        - 1550
+      - - 0
+        - 1550
   roi:
-    x1: 880
-    y1: 900
-    x2: 1420
-    y2: 900
+    x1: 480
+    y1: 360
+    x2: 800
+    y2: 360
     entry_roi:
       enabled: false
-      x1: 960
+      x1: 480
       y1: 0
-      x2: 1325
-      y2: 330
+      x2: 800
+      y2: 180
       entry_direction: down
   condition_c:
     enabled: true
+    roi:
+      x1: 480
+      y1: 0
+      x2: 800
+      y2: 720
     max_allowed_bags: 3
     save_roi_image: false
     save_full_frame: false
     save_distances: false
 - id: 2
   name: Camera 2
-  enabled: true
+  enabled: false
   ai_enabled: true
   production:
     count_enabled: true
@@ -263,9 +320,28 @@ cameras:
     include_prints_in_total: true
   # mode: rtsp
   # source: rtsp://admin:Beumer!123@192.168.1.241:554/live/1/1
+  # source: rtsp://deep:deep@10.230.30.189:1945/live/1/1
   mode: video
-  source: data/videos/C11.mp4
+  source: data/videos/C1.mp4
   buffer_size: 1
+  frame_skip: 1
+  width: 1280
+  height: 720
+  fps: 15
+  process_width: 1280
+  process_height: 720
+  idle_trigger:
+    enabled: true
+    check_rate_hz: 2
+    sensitivity: 12
+    min_changed_fraction: 0.02
+    downscale_width: 160
+    idle_timeout_seconds: 5
+    roi:
+      x1: 0
+      y1: 0
+      x2: 1280
+      y2: 720
   inference_timeout: 15
   performance_monitoring: false
   dashboard_publish_interval: 0.5
@@ -290,9 +366,9 @@ cameras:
     path: models/best.pt
     confidence: 0.2
     iou: 0.45
-    device: cuda:0
+    device: cpu
     image_size: 640
-    half: true
+    half: false
     max_detections: 20
     min_bbox_area: 800
     detection_roi:
@@ -379,6 +455,15 @@ cameras:
   mode: video
   source: data/videos/C1.mp4
   buffer_size: 1
+  frame_skip: 1
+  width: 1280
+  height: 720
+  fps: 15
+  process_width: 1280
+  process_height: 720
+  idle_trigger:
+    enabled: true
+    idle_timeout_seconds: 5
   inference_timeout: 15
   performance_monitoring: false
   dashboard_publish_interval: 0.5
@@ -389,7 +474,7 @@ cameras:
     path: models/best.pt
     confidence: 0.2
     iou: 0.45
-    device: cuda:0
+    device: cpu
     image_size: 640
     half: false
     max_detections: 50
@@ -434,7 +519,7 @@ cameras:
 display:
   show_window: false
   show_boxes: true
-  show_labels: false
+  show_labels: true
   show_center: false
   show_roi: false
   show_fps: false
@@ -464,9 +549,9 @@ logging:
   count_flush_immediately: true
 database:
   enabled: true
-  server: WS-1NNHFY3\SQLEXPRESS
+  server: MSI\SQLEXPRESS
   name: FillPacAI
-  driver: ODBC Driver 17 for SQL Server
+  driver: ODBC Driver 18 for SQL Server
   authentication:
     trusted_connection: true
   encrypt: false
