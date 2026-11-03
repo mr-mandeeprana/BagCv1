@@ -2525,6 +2525,11 @@ class DashboardState:
                 ),
             )
 
+        # Missing-print bags must not also be included in the
+        # printed total. Camera-level print counters can contain the
+        # pre-subtraction total, so normalize the system total here.
+        total_printed = max(0, total_printed - total_missing)
+
         self._state["total_count"] = total_count
         self._state["total_printed_count"] = total_printed
         self._state["total_missing_count"] = total_missing
