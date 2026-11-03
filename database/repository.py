@@ -1342,33 +1342,45 @@ def get_all_camera_states() -> dict[str, dict]:
 
 def _print_totals_by_camera(cursor, since=None) -> dict:
     """
-    {camera_id: (printed, missing)} counted from dbo.print_events
-    (one row per print result). print_events is the source of
-    truth for printed / missing numbers.
+    Return the latest cumulative print totals per camera.
+
+    Printed bags are calculated as:
+        total_count - total_missing
+
+    This prevents missing-print bags from also being included in
+    the printed total when total_printed in the event snapshot
+    contains the unadjusted count.
     """
 
     query = """
-        SELECT camera_id, result, COUNT(*)
-        FROM dbo.print_events
+        WITH LatestTotals AS (
+            SELECT
+                camera_id,
+                total_count,
+                total_missing,
+                ROW_NUMBER() OVER (
+                    PARTITION BY camera_id
+                    ORDER BY id DESC
+                ) AS rn
+            FROM dbo.print_events
+            WHERE total_count IS NOT NULL
+        )
+        SELECT
+            camera_id,
+            total_count,
+            total_missing
+        FROM LatestTotals
+        WHERE rn = 1
     """
-    params = []
 
-    if since is not None:
-        query += " WHERE timestamp >= CAST(? AS DATETIMEOFFSET)"
-        params.append(since)
-
-    query += " GROUP BY camera_id, result"
-
-    cursor.execute(query, params)
+    cursor.execute(query)
 
     totals: dict = {}
 
-    for cam, result, n in cursor.fetchall():
-        printed, missing = totals.get(cam, (0, 0))
-        if result == "printed":
-            printed += int(n)
-        elif result == "missing":
-            missing += int(n)
+    for cam, total_count, missing in cursor.fetchall():
+        total_count = int(total_count or 0)
+        missing = int(missing or 0)
+        printed = max(0, total_count - missing)
         totals[cam] = (printed, missing)
 
     return totals
